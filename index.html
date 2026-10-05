@@ -163,7 +163,7 @@
   .acct-field input{width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:#fafbfc; font-size:13.5px; color:var(--ink);}
   .acct-field input:focus{outline:none; border-color:var(--blue);}
   .acct-note{font-size:11.5px; color:var(--muted); margin-top:10px; line-height:1.5;}
-  .acct-actions{display:flex; gap:10px; margin-top:16px;}
+  .acct-actions{display:flex; flex-wrap:wrap; gap:10px; margin-top:16px;}
   .acct-btn{padding:10px 20px; border-radius:8px; border:none; font-size:13px; cursor:pointer; background:var(--blue-deep); color:#fff;}
   .acct-btn:hover{background:var(--blue);}
   .acct-btn.secondary{background:#fff; color:var(--blue-deep); border:1px solid var(--blue-deep);}
@@ -209,6 +209,7 @@
     </div>
     <button class="btn" id="loginBtn" onclick="attemptLogin()">Нэвтрэх</button>
     <div class="login-error" id="loginError"></div>
+    <div id="appVersion" style="margin-top:14px; font-size:11px; color:#9aa5a1; text-align:center;"></div>
   </div>
 </div>
 
@@ -324,6 +325,8 @@
       <div class="acct-actions">
         <button class="acct-btn secondary" onclick="loadEmployeeManager()">Ажилтдын жагсаалт ачаалах</button>
         <button class="acct-btn secondary" onclick="autofillMissingPasswords()">Дутуу нууц үгсийг санал болгож бөглөх</button>
+        <button class="acct-btn secondary" onclick="randomizeAllPasswords()">Бүх ажилтанд санамсаргүй нууц үг үүсгэх</button>
+        <button class="acct-btn secondary" onclick="downloadPasswordList()">Нууц үгийн жагсаалт татах (CSV)</button>
       </div>
       <div class="preview-wrap" id="empManagerWrap" style="display:none; margin-top:14px;">
         <table class="preview" id="empManagerTable"></table>
@@ -358,6 +361,29 @@
         <table class="preview" id="previewTable"></table>
       </div>
     </div>
+
+    <div class="acct-card">
+      <h3>5. Сарын өгөгдөл засах (ажилласан хугацааны цалин ↔ илүү цагийн цалин)</h3>
+      <div class="acct-note">
+        Тухайн сарын "Ажилласан хугацааны цалин" 0 болж, тэр дүн нь "Илүү цагийн цалин" руу орчихсон бол энд засна.
+        Зөвхөн ажилласан хугацааны цалин = 0, илүү цагийн цалин &gt; 0, илүү цагийн цаг = 0 байгаа мөрийг л
+        автоматаар зөөнө; илүү цаг нь бодитоор байгаа мөрийг гар хүрэлгүй жагсаалтад тусад нь харуулна.
+      </div>
+      <div class="acct-grid">
+        <div class="acct-field">
+          <label>Засах саруудын нэр (таслалаар тусгаарла)</label>
+          <input id="repairMonthsInput" type="text" value="1-р сар, 2-р сар">
+        </div>
+      </div>
+      <div class="acct-actions">
+        <button class="acct-btn secondary" onclick="planMonthRepair()">Шалгах (өөрчлөхгүй)</button>
+        <button class="acct-btn" id="repairApplyBtn" onclick="applyMonthRepair()" disabled>Засаад Gist рүү хадгалах</button>
+      </div>
+      <div class="preview-wrap" id="repairPreviewWrap" style="display:none; margin-top:14px;">
+        <table class="preview" id="repairPreviewTable"></table>
+      </div>
+      <div class="acct-status" id="repairStatus"></div>
+    </div>
   </div>
 </div>
 
@@ -368,6 +394,7 @@
    Ажилтны нэвтрэх нэр/нууц үг одоо энэ Gist-ийн дотор (employees.<username>.password) хадгалагдана —
    Нягтлан бодогчийн самбар дахь "Ажилтан удирдах" хэсгээр нэмэх/хасах/солих боломжтой.
    ========================================================================= */
+  const APP_VERSION = 'v2026.10.05-b (сар эрэмбэлэх засвар)';
   const CONFIG = {
     GIST_RAW_URL: "https://gist.githubusercontent.com/donidinoguree-bot/0620f614a576dd761cb237c2e4979b0f/raw/salary_data.json",
     GIST_ID: "0620f614a576dd761cb237c2e4979b0f",
@@ -380,6 +407,8 @@
 
   const fmt = n => Math.round(n || 0).toLocaleString('mn-MN') + '₮';
   const fmtH = n => (n === undefined || n === null) ? '—' : (Math.round(n*10)/10).toLocaleString('mn-MN') + ' ц';
+  // Нийт олгосон цалин = гарт олгох дүн (netPay) + сарын дундуур олгосон урьдчилгаа
+  const getTotalPaid = obj => (obj.netPay || 0) + ((obj.deductions && obj.deductions.advance) || 0);
 
   // Ангилал бүрийн зүйлсийн жагсаалт (харагдах нэр, түлхүүр, нэгж, тал)
   const CATEGORY_DEFS = [
@@ -594,8 +623,24 @@
   }
 
   function getMonthNumber(label){
-    const m = /([0-9]{1,2})\s*-?\s*р\s*сар/.exec(label || '');
-    return m ? parseInt(m[1], 10) : null;
+    // 4 оронтой жилийг хасаад, үлдсэнээс эхний 1-2 оронтой тоог сарын дугаар гэж авна.
+    // "8-р сар", "8-p сар" (латин p), "2026 оны 9-р сар" бүгдийг таниулна.
+    const cleaned = String(label || '').replace(/\b\d{4}\b/g, ' ');
+    const m = /(\d{1,2})/.exec(cleaned);
+    if (!m) return null;
+    const n = parseInt(m[1], 10);
+    return (n >= 1 && n <= 12) ? n : null;
+  }
+
+  // Саруудыг сарын дугаараар (1..12) цаг хугацааны дарааллаар (хуучнаас шинэ рүү) эрэмбэлнэ —
+  // Gist-д хадгалагдсан дараалал (upload хийсэн дараалал) буруу байсан ч зөв харагдана.
+  function sortMonthsChronologically(months){
+    const withIdx = (months || []).map((m, i) => {
+      const n = getMonthNumber(m.label);
+      return { m, i, key: n == null ? Infinity : n }; // дугаар тодорхойгүй нь хамгийн сүүлд
+    });
+    withIdx.sort((a, b) => (a.key !== b.key) ? (a.key - b.key) : (b.i - a.i));
+    return withIdx.map(x => x.m);
   }
 
   function getPeriodKey(m, granularity){
@@ -617,7 +662,7 @@
   //  - grouped=true (quarter/year): months stay visible, grouped under a spanning header, with a
   //    trailing aggregate ("Нийт") column appended after each group's own months.
   function buildGroupedColumns(months, granularity){
-    const oldestFirst = [...(months || [])].slice().reverse();
+    const oldestFirst = sortMonthsChronologically(months);
     if (granularity === 'month'){
       return { grouped:false, flat: oldestFirst.map(m => ({ data:m, isAgg:false })) };
     }
@@ -673,7 +718,7 @@
     const months = currentEmp.months;
     const n = months.length;
     const sumCalc = months.reduce((s,m)=>s+(m.calculation?.totalCalculatedPay||0),0);
-    const sumNet  = months.reduce((s,m)=>s+(m.netPay||0),0);
+    const sumNet  = months.reduce((s,m)=>s+getTotalPaid(m),0);
     const avgNet  = sumNet / n;
 
     const columns = buildGroupedColumns(months, periodGranularity);
@@ -686,7 +731,7 @@
         <div class="value">${fmt(sumCalc)}</div>
       </div>
       <div class="kpi-card green">
-        <div class="label">НИЙТ ГАРТ ОЛГОСОН ЦАЛИН</div>
+        <div class="label">НИЙТ ОЛГОСОН ЦАЛИН</div>
         <div class="value">${fmt(sumNet)}</div>
       </div>
       <div class="kpi-card gold">
@@ -700,8 +745,8 @@
         <div class="note">Сүүлийн ${periodNoun}</div>
       </div>
       <div class="kpi-card green">
-        <div class="label">${latestPeriod.label}-Н ГАРТ ОЛГОХ</div>
-        <div class="value">${fmt(latestPeriod.netPay)}</div>
+        <div class="label">${latestPeriod.label}-Н НИЙТ ОЛГОСОН</div>
+        <div class="value">${fmt(getTotalPaid(latestPeriod))}</div>
         <div class="note">Сүүлийн ${periodNoun}</div>
       </div>
     `;
@@ -773,8 +818,8 @@
       });
     });
 
-    const sumNet = realCols.reduce((s,c)=>s+(c.data.netPay||0),0);
-    html += `<tr class="net-row"><td>Гарт олгох цалин</td>${flat.map(c=>`<td class="${c.isAgg?'sub-total-col':''}">${fmt(c.data.netPay)}</td>`).join('')}${withTotal?`<td>${fmt(sumNet)}</td>`:''}</tr>`;
+    const sumNet = realCols.reduce((s,c)=>s+getTotalPaid(c.data),0);
+    html += `<tr class="net-row"><td>Нийт олгосон цалин</td>${flat.map(c=>`<td class="${c.isAgg?'sub-total-col':''}">${fmt(getTotalPaid(c.data))}</td>`).join('')}${withTotal?`<td>${fmt(sumNet)}</td>`:''}</tr>`;
     html += `</table>`;
     return `<div class="cat-block">${html}</div>`;
   }
@@ -862,21 +907,23 @@
   function renderTotalsTable(){
     const tbl = document.getElementById('totalsTable');
     if (!currentEmp || !currentEmp.months || currentEmp.months.length===0){ tbl.innerHTML=""; return; }
+    const sortedMonths = sortMonthsChronologically(currentEmp.months);
     let rows = "", sumCalc=0, sumDeduct=0, sumNet=0, sumBase=0;
-    currentEmp.months.forEach(m => {
+    sortedMonths.forEach(m => {
       const c = m.calculation||{}, d = m.deductions||{};
+      const totalPaid = getTotalPaid(m);
       sumCalc += c.totalCalculatedPay||0; sumDeduct += d.totalDeductions||0;
-      sumNet += m.netPay||0; sumBase += c.workedTimePay||0;
+      sumNet += totalPaid; sumBase += c.workedTimePay||0;
       rows += `<tr>
         <td>${m.label}</td>
         <td>${fmt(c.workedTimePay)}</td>
         <td>${fmt(c.totalCalculatedPay)}</td>
         <td class="deduct">−${fmt(d.totalDeductions)}</td>
-        <td class="net">${fmt(m.netPay)}</td>
+        <td class="net">${fmt(totalPaid)}</td>
       </tr>`;
     });
     tbl.innerHTML = `
-      <tr><th>Сар</th><th>Үндсэн цалин</th><th>Нийт бодогдсон цалин</th><th>Нийт суутгал</th><th>Гарт олгох цалин</th></tr>
+      <tr><th>Сар</th><th>Үндсэн цалин</th><th>Нийт бодогдсон цалин</th><th>Нийт суутгал</th><th>Нийт олгосон цалин</th></tr>
       ${rows}
       <tr class="grand">
         <td>Нийт (${currentEmp.months.length} сар)</td>
@@ -1100,6 +1147,15 @@
         if (allUnmatched.size){
           msg += ` ⚠️ Тохирохгүй (алгассан) багана: ${Array.from(allUnmatched).join(', ')}`;
         }
+        // Багана шилжсэн байж болзошгүй мөрийг илрүүлэх: ажилласан хугацааны цалин 0, харин илүү цагийн
+        // цалин > 0 байхад илүү цагийн цаг 0 бол ихэнхдээ дүн буруу баганад орсон байдаг.
+        const suspicious = batches.map(b => ({
+          label: b.monthLabel,
+          n: b.parsed.filter(r => !(r.calculation.workedTimePay) && (r.calculation.overtimePay > 0) && !(r.timeTracking.overtimeHours > 0)).length
+        })).filter(x => x.n > 0);
+        if (suspicious.length){
+          msg += ` ⚠️ Багана шилжсэн байж болзошгүй мөр: ${suspicious.map(x => x.label + ' (' + x.n + ')').join(', ')} — ажилласан хугацааны цалин 0, илүү цагийн цалин >0 байна. Excel-ийнхээ толгой мөрийг шалгана уу.`;
+        }
         statusEl.textContent = msg;
         document.getElementById('pushBtn').disabled = false;
       }catch(err){
@@ -1136,14 +1192,14 @@
           <td>${match ? match.username : 'ТОХИРОХГҮЙ'}</td>
           <td>${fmt(rec.calculation.totalCalculatedPay)}</td>
           <td>${fmt(rec.deductions.totalDeductions)}</td>
-          <td>${fmt(rec.top.netPay)}</td>
+          <td>${fmt(rec.top.netPay + (rec.deductions.advance||0))}</td>
         </tr>`;
       });
       html += `
         <tr><td colspan="6" style="background:#f6f8fb; font-weight:700; color:var(--blue-deep); padding-top:14px;">${monthLabel} (${batch.parsed.length} ажилтан)</td></tr>
         <tr>
           <th>Регистр</th><th>Нэр</th><th>Апп-ийн нэвтрэх нэр</th>
-          <th>Нийт бодогдсон</th><th>Нийт суутгал</th><th>Гарт олгох</th>
+          <th>Нийт бодогдсон</th><th>Нийт суутгал</th><th>Нийт олгосон</th>
         </tr>
         ${rows}
       `;
@@ -1160,8 +1216,202 @@
     return res.json();
   }
 
+  // ---------- Сарын өгөгдөл засах: ажилласан хугацааны цалин ↔ илүү цагийн цалин ----------
+  let repairPlan = null; // { moves:[{username,name,label,amount}], skipped:[{username,name,label,overtimeHours,overtimePay}] }
+
+  function parseRepairMonths(){
+    return document.getElementById('repairMonthsInput').value
+      .split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  async function planMonthRepair(){
+    const statusEl = document.getElementById('repairStatus');
+    const gistId = document.getElementById('gistIdInput').value.trim();
+    const filename = document.getElementById('gistFilenameInput').value.trim() || CONFIG.GIST_FILENAME;
+    const token = document.getElementById('githubTokenInput').value.trim();
+    const labels = parseRepairMonths();
+
+    if (!gistId || !token){
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Дээд талын Gist ID болон GitHub Token-ыг эхлээд оруулна уу.";
+      return;
+    }
+    if (labels.length === 0){
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Засах саруудын нэрийг оруулна уу (жиш: 1-р сар, 2-р сар).";
+      return;
+    }
+
+    statusEl.className = 'acct-status show info';
+    statusEl.textContent = "Gist-ийн өгөгдлийг шалгаж байна…";
+    try{
+      const gist = await fetchGistViaAPI(gistId, token);
+      const file = gist.files[filename];
+      const data = (file && file.content) ? JSON.parse(file.content) : { employees:{} };
+
+      const moves = [], skipped = [];
+      Object.keys(data.employees || {}).forEach(u => {
+        const emp = data.employees[u];
+        const name = (emp.lastName ? emp.lastName + '.' : '') + (emp.firstName || u);
+        (emp.months || []).forEach(m => {
+          if (!labels.includes(m.label)) return;
+          const calc = m.calculation || {};
+          const hrs = (m.timeTracking && m.timeTracking.overtimeHours) || 0;
+          if (!calc.workedTimePay && calc.overtimePay > 0){
+            if (hrs > 0) skipped.push({ username:u, name, label:m.label, overtimeHours:hrs, overtimePay:calc.overtimePay });
+            else moves.push({ username:u, name, label:m.label, amount:calc.overtimePay });
+          }
+        });
+      });
+
+      repairPlan = { moves, skipped, labels };
+
+      const rows = moves.map(x => `<tr><td>${x.name}</td><td>${x.label}</td><td>${fmt(x.amount)}</td><td>Ажилласан хугацааны цалин руу зөөнө</td></tr>`).join('')
+        + skipped.map(x => `<tr class="no-match"><td>${x.name}</td><td>${x.label}</td><td>${fmt(x.overtimePay)}</td><td>АЛГАСНА — илүү цаг ${x.overtimeHours} ц байгаа, гараар шалгана уу</td></tr>`).join('');
+      document.getElementById('repairPreviewTable').innerHTML =
+        `<tr><th>Ажилтан</th><th>Сар</th><th>Илүү цагийн цалин (одоо)</th><th>Үйлдэл</th></tr>${rows || '<tr><td colspan="4">Засах мөр олдсонгүй.</td></tr>'}`;
+      document.getElementById('repairPreviewWrap').style.display = 'block';
+      document.getElementById('repairApplyBtn').disabled = moves.length === 0;
+
+      statusEl.className = 'acct-status show ok';
+      statusEl.textContent = `${moves.length} мөр засагдахад бэлэн, ${skipped.length} мөр алгасагдана. Шалгаад "Засаад Gist рүү хадгалах" дарна уу.`;
+    }catch(err){
+      console.error(err);
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Алдаа: " + err.message;
+    }
+  }
+
+  async function applyMonthRepair(){
+    const statusEl = document.getElementById('repairStatus');
+    const gistId = document.getElementById('gistIdInput').value.trim();
+    const filename = document.getElementById('gistFilenameInput').value.trim() || CONFIG.GIST_FILENAME;
+    const token = document.getElementById('githubTokenInput').value.trim();
+    if (!repairPlan || repairPlan.moves.length === 0){
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Эхлээд \"Шалгах\" дарж засах мөрүүдийг гаргана уу.";
+      return;
+    }
+    if (!gistId || !token){
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Gist ID болон GitHub Token заавал шаардлагатай.";
+      return;
+    }
+
+    statusEl.className = 'acct-status show info';
+    statusEl.textContent = "Засаж байна…";
+    try{
+      // Хадгалахын өмнө дахин сүүлийн хувилбарыг татаж, нөхцөлийг дахин шалгаад зөвхөн тэр мөрүүдийг л засна
+      const gist = await fetchGistViaAPI(gistId, token);
+      const file = gist.files[filename];
+      const data = JSON.parse(file.content);
+
+      let fixed = 0;
+      repairPlan.moves.forEach(mv => {
+        const emp = data.employees[mv.username];
+        if (!emp) return;
+        const m = (emp.months || []).find(x => x.label === mv.label);
+        if (!m || !m.calculation) return;
+        const hrs = (m.timeTracking && m.timeTracking.overtimeHours) || 0;
+        if (!m.calculation.workedTimePay && m.calculation.overtimePay > 0 && hrs === 0){
+          m.calculation.workedTimePay = m.calculation.overtimePay;
+          m.calculation.overtimePay = 0;
+          fixed++;
+        }
+      });
+
+      data.updatedAt = new Date().toLocaleString('mn-MN');
+      const patchRes = await fetch('https://api.github.com/gists/' + gistId, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': 'token ' + token,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ files: { [filename]: { content: JSON.stringify(data, null, 2) } } })
+      });
+      if (!patchRes.ok) throw new Error('Gist бичихэд алдаа гарлаа (' + patchRes.status + ')');
+
+      repairPlan = null;
+      document.getElementById('repairApplyBtn').disabled = true;
+      statusEl.className = 'acct-status show ok';
+      statusEl.textContent = `Амжилттай: ${fixed} мөрийн ажилласан хугацааны цалинг зассан. Апп-аа шинэчилж (F5) шалгана уу.`;
+    }catch(err){
+      console.error(err);
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Алдаа: " + err.message;
+    }
+  }
+
   // ---------- Ажилтан удирдах (Нягтлан бодогчийн панель) ----------
   let empManagerWorking = null; // { username: {registerNumber,lastName,firstName,position,accountInfo,baseSalaryRate,avgWage,password,active,months} }
+
+  // Санамсаргүй нууц үг: 8 тэмдэгт, жижиг латин үсэг + тоо. Андуурагдах i, l, o, 0, 1-ийг оруулаагүй.
+  function generateRandomPassword(len){
+    len = len || 8;
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const limit = 256 - (256 % chars.length); // modulo bias-аас сэргийлнэ
+    const buf = new Uint8Array(1);
+    let pw;
+    do {
+      pw = '';
+      while (pw.length < len){
+        crypto.getRandomValues(buf);
+        if (buf[0] >= limit) continue;
+        pw += chars[buf[0] % chars.length];
+      }
+    } while (!/[a-z]/.test(pw) || !/[2-9]/.test(pw)); // үсэг, тоо хоёулаа заавал байна
+    return pw;
+  }
+
+  function randomizeAllPasswords(){
+    const statusEl = document.getElementById('empManagerStatus');
+    if (!empManagerWorking){
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Эхлээд ажилтдын жагсаалтыг ачаална уу.";
+      return;
+    }
+    const usernames = Object.keys(empManagerWorking);
+    if (!confirm(`${usernames.length} ажилтан бүрийн нууц үгийг санамсаргүй шинэ нууц үгээр солих уу? Одоогийн нууц үгс хүчингүй болно.`)) return;
+
+    const used = new Set();
+    usernames.forEach(u => {
+      let pw;
+      do { pw = generateRandomPassword(8); } while (used.has(pw));
+      used.add(pw);
+      empManagerWorking[u].password = pw;
+    });
+    renderEmployeeManagerTable();
+    statusEl.className = 'acct-status show ok';
+    statusEl.textContent = `${usernames.length} ажилтанд санамсаргүй нууц үг үүслээ. Одоо "Нууц үгийн жагсаалт татах (CSV)" дарж хадгалаад, дараа нь "Бүх өөрчлөлтийг Gist рүү хадгалах" дарна уу. Хадгалахаас өмнө хуудсыг сэргээвэл эдгээр нууц үг алдагдана.`;
+  }
+
+  function downloadPasswordList(){
+    const statusEl = document.getElementById('empManagerStatus');
+    if (!empManagerWorking){
+      statusEl.className = 'acct-status show err';
+      statusEl.textContent = "Эхлээд ажилтдын жагсаалтыг ачаална уу.";
+      return;
+    }
+    const esc = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const lines = [['Нэвтрэх нэр', 'Овог', 'Нэр', 'Нууц үг'].map(esc).join(',')];
+    Object.keys(empManagerWorking).sort().forEach(u => {
+      const e = empManagerWorking[u];
+      lines.push([u, e.lastName, e.firstName, e.password].map(esc).join(','));
+    });
+    // \uFEFF: Excel кирилл үсгийг зөв танихын тулд
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ajiltnii_nuuts_ug.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    statusEl.className = 'acct-status show info';
+    statusEl.textContent = "Жагсаалт татагдлаа. Нууц үгийг ажилтан бүрт өгсний дараа файлыг устгана уу.";
+  }
 
   function autofillMissingPasswords(){
     const statusEl = document.getElementById('empManagerStatus');
@@ -1471,6 +1721,7 @@
   document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key==='Enter') attemptLogin(); });
 
   // Хуудас ачаалмагц шууд Gist-ээс ажилтны жагсаалт/өгөгдлийг татаж бэлдэнэ
+  document.getElementById('appVersion').textContent = 'Хувилбар: ' + APP_VERSION;
   loadDirectoryData();
 </script>
 </body>
